@@ -47,6 +47,12 @@ type UpCmd struct {
 	tagAssetCounts      map[string]int // Track total asset counts per tag
 	tagAssetCountsMutex sync.RWMutex   // Mutex to protect tagAssetCounts
 
+	// Fields for storing tag information for later logging when SkipTaggingAfterUpload is enabled
+	tagAssetMapping      map[string][]string // Map of tag ID to asset IDs that should be tagged
+	tagAssetMappingMutex sync.RWMutex        // Mutex to protect tagAssetMapping
+	tagNameToID          map[string]string   // Map of tag name to tag ID
+	tagNameToIDMutex     sync.RWMutex        // Mutex to protect tagNameToID
+
 	shouldResumeJobs map[string]bool // List of jobs to resume
 	finished         bool            // the finish task has been run
 }
@@ -60,6 +66,8 @@ func newUpload(mode UpLoadMode, app *app.Application, options *UploadOptions) *U
 		immichAssetsReady: make(chan struct{}),
 		albumAssetCounts:  make(map[string]int),
 		tagAssetCounts:    make(map[string]int),
+		tagAssetMapping:   make(map[string][]string),
+		tagNameToID:       make(map[string]string),
 	}
 
 	return upCmd
@@ -119,14 +127,32 @@ func (upCmd *UpCmd) saveTags(ctx context.Context, tag assets.Tag, ids []string) 
 		}
 		upCmd.app.Jnl().Log().Info("created tag", "tag", tag.Value, "assets", len(ids), "total_assets", totalAssets)
 		tag.ID = r[0].ID
+
+		// Store the tag name to ID mapping for later logging
+		upCmd.tagNameToIDMutex.Lock()
+		upCmd.tagNameToID[tag.Value] = tag.ID
+		upCmd.tagNameToIDMutex.Unlock()
 	}
-	_, err := upCmd.app.Client().Immich.TagAssets(ctx, tag.ID, ids)
-	if err != nil {
-		upCmd.app.Jnl().Log().Error("failed to add assets to tag", "err", err, "tag", tag.Value, "assets", len(ids), "total_assets", totalAssets)
-		return tag, err
+
+	// Check if we should skip tagging assets after upload to avoid race condition
+	if upCmd.app.Client().SkipTaggingAfterUpload {
+		// Store the tag ID and asset IDs for later logging
+		upCmd.tagAssetMappingMutex.Lock()
+		upCmd.tagAssetMapping[tag.ID] = append(upCmd.tagAssetMapping[tag.ID], ids...)
+		upCmd.tagAssetMappingMutex.Unlock()
+
+		// Log that we're skipping tagging
+		upCmd.app.Jnl().Log().Info("skipped tagging assets due to workaround mode", "tag", tag.Value, "assets", len(ids), "total_assets", totalAssets)
+	} else {
+		_, err := upCmd.app.Client().Immich.TagAssets(ctx, tag.ID, ids)
+		if err != nil {
+			upCmd.app.Jnl().Log().Error("failed to add assets to tag", "err", err, "tag", tag.Value, "assets", len(ids), "total_assets", totalAssets)
+			return tag, err
+		}
+		upCmd.app.Jnl().Log().Info("updated tag", "tag", tag.Value, "assets", len(ids), "total_assets", totalAssets)
 	}
-	upCmd.app.Jnl().Log().Info("updated tag", "tag", tag.Value, "assets", len(ids), "total_assets", totalAssets)
-	return tag, err
+
+	return tag, nil
 }
 
 func (UpCmd *UpCmd) pauseJobs(ctx context.Context, app *app.Application) error {
@@ -185,6 +211,51 @@ func (UpCmd *UpCmd) finishing(ctx context.Context, app *app.Application) error {
 		}
 	}
 	UpCmd.albumAssetCountsMutex.RUnlock()
+
+	// Log tag information for debugging when SkipTaggingAfterUpload is enabled
+	if UpCmd.app.Client().SkipTaggingAfterUpload {
+		UpCmd.tagNameToIDMutex.RLock()
+		UpCmd.tagAssetMappingMutex.RLock()
+
+		// Log asset IDs for each tag for manual API calls
+		for tagID, assetIDs := range UpCmd.tagAssetMapping {
+			if len(assetIDs) > 0 {
+				// Find the tag name for this ID
+				var tagName string
+				for name, id := range UpCmd.tagNameToID {
+					if id == tagID {
+						tagName = name
+						break
+					}
+				}
+
+				// Format asset IDs into multiple lines with a maximum of 3 IDs per line
+				var assetIDLines []string
+				for i := 0; i < len(assetIDs); i += 3 {
+					end := i + 3
+					if end > len(assetIDs) {
+						end = len(assetIDs)
+					}
+					group := assetIDs[i:end]
+					assetIDLine := strings.Join(group, "\", \"")
+					assetIDLine = "    \"" + assetIDLine + "\""
+					assetIDLines = append(assetIDLines, assetIDLine)
+				}
+
+				// Start asset IDs on a new line
+				assetIDList := "\n" + strings.Join(assetIDLines, ",\n")
+
+				app.Jnl().Log().Info("=== TAG ASSET MAPPING ===",
+					"tag_id", tagID,
+					"tag_name", tagName,
+					"asset_count", len(assetIDs),
+					"asset_ids", assetIDList)
+			}
+		}
+
+		UpCmd.tagAssetMappingMutex.RUnlock()
+		UpCmd.tagNameToIDMutex.RUnlock()
+	}
 
 	// Resume immich background jobs if requested
 	err := UpCmd.resumeJobs(ctx, app)

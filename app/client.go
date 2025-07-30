@@ -38,6 +38,7 @@ type Client struct {
 	OnServerErrors            cliflags.OnServerErrorsFlag // Behavior on server errors
 	User                      immich.User                 // User info corresponding to the API key
 	PauseImmichBackgroundJobs bool                        // Pause Immich background jobs
+	SkipTaggingAfterUpload    bool                        // Skip tagging assets after upload to avoid race condition
 }
 
 // add server flags to the command cmd
@@ -57,6 +58,7 @@ func AddClientFlags(ctx context.Context, cmd *cobra.Command, app *Application, d
 	cmd.PersistentFlags().BoolVar(&client.DryRun, "dry-run", dryRun, "Simulate all actions")
 	cmd.PersistentFlags().StringVar(&client.TimeZone, "time-zone", client.TimeZone, "Override the system time zone")
 	cmd.PersistentFlags().Var(&client.OnServerErrors, "on-server-errors", "Action to take on server errors, (stop|continue| <n> errors)")
+	cmd.PersistentFlags().BoolVar(&client.SkipTaggingAfterUpload, "skip-tagging-after-upload", false, "Skip tagging assets after upload to avoid race condition")
 
 	cmd.PersistentPreRunE = ChainRunEFunctions(cmd.PersistentPreRunE, OpenClient, ctx, cmd, app)
 	cmd.PersistentPostRunE = ChainRunEFunctions(cmd.PersistentPostRunE, CloseClient, ctx, cmd, app)

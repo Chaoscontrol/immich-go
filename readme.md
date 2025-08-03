@@ -416,8 +416,22 @@ The **from-google-photos** sub-command processes a Google Photos takeout archive
 | --takeout-tag             |                `TRUE`                 | Tag uploaded photos with a tag "{takeout}/takeout-YYYYMMDDTHHMMSSZ"                                                                                                                |
 | --people-tag              |                `TRUE`                 | Tag uploaded photos with tags \"people/name\" found in the JSON file                                                                                                               |
 | --shared-album-tag        |                `TRUE`                 | Tag photos from others in shared albums with \"From Shared Album\".                                                                                                                  |
+| --create-shared-albums    |                `TRUE`                 | Create albums for photos with album_name descriptions.                                                                                                                               |
 
-## Google Photos Best Practices:
+## Shared Album Support
+
+Immich-Go now supports importing photos from shared albums in Google Photos takeouts. When photos are shared with you through Google Photos shared albums, they typically end up in year-based folders without album membership information in the standard takeout.
+
+To address this limitation, you can use external tools (like Google Photos Toolkit) to add album information to the photo descriptions before creating your takeout. Immich-Go can then read this information and properly organize these photos into albums.
+
+### Adding Album Information to Shared Photos
+
+Before creating your Google Photos takeout, you can use this modified [Google Photos Toolkit](https://github.com/Chaoscontrol/Google-Photos-Toolkit/tree/album-metadata) to add album information to shared photos. This toolkit can be modified to add a special description to photos in shared albums with the format: `album_name: Album1, Album2`
+
+### Importing Shared Albums
+
+When Immich-Go processes a takeout with this album information, it will automatically organize the photos into the specified albums. This feature is enabled by default when using the `--sync-albums` option with `upload from-google-photos`.
+
 
 * **Taking Out Your Photos:**
   * Choose the ZIP format when creating your takeout for easier import.

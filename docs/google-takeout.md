@@ -25,6 +25,17 @@ Google takeout structure is complex and not documented. Some information may be 
   - Partner flag
   - But not all images have a JSON companion
 
+## Shared Albums Support
+When photos are shared with you through Google Photos shared albums, they typically end up in year-based folders without album membership information in the standard takeout. This makes it difficult to preserve the original album structure when importing to Immich.
+
+To address this limitation, you can use external tools (like Google Photos Toolkit) to add album information to the photo descriptions before creating your takeout. Immich-Go can then read this information and properly organize these photos into albums.
+
+### Adding Album Information to Shared Photos
+Before creating your Google Photos takeout, you can use a modified [Google Photos Toolkit](https://github.com/Chaoscontrol/Google-Photos-Toolkit/tree/album-metadata) to add album information to shared photos. This toolkit can be modified to add a special description to photos in shared albums with the format: `album_name: Album1, Album2`
+
+### Importing Shared Albums
+When Immich-Go processes a takeout with this album information, it will automatically organize the photos into the specified albums. This feature is enabled by default when using the `--sync-albums` option with `upload from-google-photos`.
+
 ## The JSON file and the image name matches with some weird rules
 The name length of the image can be shorter by 1 char compared to the name of the JSON.
 

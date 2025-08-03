@@ -4,6 +4,8 @@ immich-go
 .vscode/launch.json
 .vscode/settings.json
 immich-go
+immich-go-mod
+build_all_platforms.ps1
 
 !readme.md
 

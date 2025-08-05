@@ -26,10 +26,11 @@ import (
 )
 
 type Takeout struct {
-	fsyss       []fs.FS
-	catalogs    map[string]directoryCatalog                // file catalogs by directory in the set of the all takeout parts
-	albums      map[string]assets.Album                    // track album names by folder
-	fileTracker *gen.SyncMap[fileKeyTracker, trackingInfo] // map[fileKeyTracker]trackingInfo // key is base name + file size,  value is list of file paths
+	fsyss        []fs.FS
+	catalogs     map[string]directoryCatalog                // file catalogs by directory in the set of the all takeout parts
+	albums       map[string]assets.Album                    // track album names by folder
+	sharedAlbums map[string][]string                        // map of asset paths to album names for shared albums
+	fileTracker  *gen.SyncMap[fileKeyTracker, trackingInfo] // map[fileKeyTracker]trackingInfo // key is base name + file size,  value is list of file paths
 	// debugLinkedFiles []linkedFiles
 	log      *fileevent.Recorder
 	flags    *ImportFlags // command-line flags
@@ -72,6 +73,12 @@ type assetFile struct {
 	md     *assets.Metadata // will point to the associated metadata
 }
 
+// sharedAlbumInfo holds information about shared albums extracted from photo descriptions
+type sharedAlbumInfo struct {
+	assetPath  string   // Path to the asset file
+	albumNames []string // Names of albums the asset should be added to
+}
+
 // Implement slog.LogValuer for assetFile
 func (af assetFile) LogValue() slog.Value {
 	return slog.GroupValue(
@@ -83,12 +90,13 @@ func (af assetFile) LogValue() slog.Value {
 
 func NewTakeout(ctx context.Context, l *fileevent.Recorder, flags *ImportFlags, fsyss ...fs.FS) (*Takeout, error) {
 	to := Takeout{
-		fsyss:       fsyss,
-		catalogs:    map[string]directoryCatalog{},
-		albums:      map[string]assets.Album{},
-		fileTracker: gen.NewSyncMap[fileKeyTracker, trackingInfo](), // map[fileKeyTracker]trackingInfo{},
-		log:         l,
-		flags:       flags,
+		fsyss:        fsyss,
+		catalogs:     map[string]directoryCatalog{},
+		albums:       map[string]assets.Album{},
+		sharedAlbums: map[string][]string{},
+		fileTracker:  gen.NewSyncMap[fileKeyTracker, trackingInfo](), // map[fileKeyTracker]trackingInfo{},
+		log:          l,
+		flags:        flags,
 	}
 	if flags.InfoCollector == nil {
 		flags.InfoCollector = filenames.NewInfoCollector(flags.TZ, flags.SupportedMedia)
@@ -213,10 +221,68 @@ func (to *Takeout) passOneFsWalk(ctx context.Context, w fs.FS) error {
 					if err == nil {
 						switch {
 						case md.isAsset():
-							md := md.AsMetadata(fshelper.FSName(w, name), to.flags.PeopleTag) // Keep metadata
-							dirCatalog.jsons[base] = md
-							to.log.Log().Debug("Asset JSON", "metadata", md)
-							to.log.Record(ctx, fileevent.DiscoveredSidecar, fshelper.FSName(w, name), "type", "asset metadata", "title", md.FileName, "date", md.DateTaken)
+							// Extract album names from description before creating metadata object
+							albumNames, cleanedDescription := []string{}, md.Description
+							if to.flags.CreateSharedAlbums {
+								albumNames, cleanedDescription = extractAlbumNamesFromDescription(md.Description)
+							}
+
+							// Create metadata object with potentially cleaned description
+							assetMd := md.AsMetadata(fshelper.FSName(w, name), to.flags.PeopleTag, to.flags) // Keep metadata
+
+							// Update the metadata description if we extracted album names
+							if len(albumNames) > 0 {
+								assetMd.Description = cleanedDescription
+							}
+
+							// Log the original metadata before any modifications
+							to.log.Log().Debug("Original metadata", "fileName", assetMd.FileName, "description", assetMd.Description, "dateTaken", assetMd.DateTaken, "latitude", assetMd.Latitude, "longitude", assetMd.Longitude)
+
+							// Check if this asset has album_name in its description for shared albums feature
+							if to.flags.CreateSharedAlbums && len(albumNames) > 0 {
+								// Log the modified metadata
+								to.log.Log().Debug("Modified metadata", "fileName", assetMd.FileName, "description", assetMd.Description, "dateTaken", assetMd.DateTaken, "latitude", assetMd.Latitude, "longitude", assetMd.Longitude)
+
+								// Store the shared album information using the actual asset file path
+								// This matches how the asset file name is stored in the second pass
+								assetPath := fshelper.FSName(w, path.Join(dir, assetMd.FileName)).Name()
+								// Store without extension for matching
+								assetPathWithoutExt := fshelper.FSName(w, path.Join(dir, strings.TrimSuffix(assetMd.FileName, path.Ext(assetMd.FileName)))).Name()
+
+								// Store both with and without extension
+								to.sharedAlbums[assetPath] = albumNames
+								to.sharedAlbums[assetPathWithoutExt] = albumNames
+
+								// Log what we stored
+								to.log.Log().Debug("Stored shared album info", "assetPath", assetPath, "assetPathWithoutExt", assetPathWithoutExt, "albumNames", strings.Join(albumNames, ", "))
+
+								// Log that we found a photo with shared album information
+								// Check if this photo is in an album folder (unexpected but possible)
+								isInAlbumFolder := false
+								for albumDir := range to.albums {
+									if strings.HasPrefix(dir, albumDir) && dir != albumDir {
+										isInAlbumFolder = true
+										break
+									}
+								}
+
+								if isInAlbumFolder {
+									to.log.Record(ctx, fileevent.DiscoveredSidecar, fshelper.FSName(w, name),
+										"type", "shared album photo in album folder",
+										"title", assetMd.FileName,
+										"album_names", strings.Join(albumNames, ", "),
+										"warning", "photo with album_name description found in album folder")
+								} else {
+									to.log.Record(ctx, fileevent.DiscoveredSidecar, fshelper.FSName(w, name),
+										"type", "shared album photo",
+										"title", assetMd.FileName,
+										"album_names", strings.Join(albumNames, ", "))
+								}
+							}
+
+							dirCatalog.jsons[base] = assetMd
+							to.log.Log().Debug("Asset JSON", "metadata", assetMd)
+							to.log.Record(ctx, fileevent.DiscoveredSidecar, fshelper.FSName(w, name), "type", "asset metadata", "title", assetMd.FileName, "date", assetMd.DateTaken)
 						case md.isAlbum():
 							to.log.Log().Debug("Album JSON", "metadata", md)
 							if !to.flags.KeepUntitled && md.Title == "" {
@@ -382,6 +448,12 @@ func (to *Takeout) solvePuzzle(ctx context.Context) error {
 // Each asset is a group of files that are associated with each other
 
 func (to *Takeout) passTwo(ctx context.Context, gOut chan *assets.Group) error {
+	// Log the contents of sharedAlbums map for debugging
+	to.log.Log().Debug("Shared albums map contents", "count", len(to.sharedAlbums))
+	for assetPath, albumNames := range to.sharedAlbums {
+		to.log.Log().Debug("Shared album entry", "assetPath", assetPath, "albumNames", strings.Join(albumNames, ", "))
+	}
+
 	dirs := gen.MapKeys(to.catalogs)
 	sort.Strings(dirs)
 	for _, dir := range dirs {
@@ -472,6 +544,62 @@ func (to *Takeout) handleDir(ctx context.Context, dir string, gOut chan *assets.
 				if to.flags.PartnerSharedAlbum != "" && a.FromPartner {
 					a.Albums = append(a.Albums, assets.Album{Title: to.flags.PartnerSharedAlbum})
 				}
+
+				// Add shared albums for photos with album_name descriptions
+				if to.flags.CreateSharedAlbums {
+					// Directly match the asset file name with stored shared album information
+					// We store the paths in passOneFsWalk with the same format as a.File.Name()
+
+					to.log.Log().Debug("Looking for shared album info", "file", a.File.Name())
+
+					// Try to find matching shared album information using the full asset file name
+					var albumNames []string
+					var found bool
+
+					// First try with the full file name
+					if names, exists := to.sharedAlbums[a.File.Name()]; exists {
+						albumNames = names
+						found = true
+						to.log.Log().Debug("Found shared album info by full file name", "file", a.File.Name(), "albums", strings.Join(names, ", "))
+					} else {
+						to.log.Log().Debug("No shared album info found by full file name", "file", a.File.Name())
+					}
+
+					// If not found, try with the file name without extension
+					if !found {
+						fileNameWithoutExt := strings.TrimSuffix(a.File.Name(), path.Ext(a.File.Name()))
+						if names, exists := to.sharedAlbums[fileNameWithoutExt]; exists {
+							albumNames = names
+							found = true
+							to.log.Log().Debug("Found shared album info by file name without ext", "file", fileNameWithoutExt, "albums", strings.Join(names, ", "))
+						} else {
+							to.log.Log().Debug("No shared album info found by file name without ext", "file", fileNameWithoutExt)
+						}
+					}
+
+					// Check if this asset has shared album information
+					if found {
+						// Add each album to the asset
+						for _, albumName := range albumNames {
+							// Check if this album is already in the asset's albums to avoid duplicates
+							alreadyExists := false
+							for _, existingAlbum := range a.Albums {
+								if existingAlbum.Title == albumName {
+									alreadyExists = true
+									break
+								}
+							}
+
+							if !alreadyExists {
+								a.Albums = append(a.Albums, assets.Album{Title: albumName})
+								to.log.Log().Debug("Added shared album to asset", "asset", a.File.Name(), "album", albumName)
+							}
+						}
+					} else {
+						to.log.Log().Debug("No shared album info found for asset", "asset", a.File.Name())
+					}
+				}
+
 				if a.FromApplication != nil {
 					a.FromApplication.Albums = a.Albums
 				}
@@ -539,6 +667,9 @@ func (to *Takeout) makeAsset(_ context.Context, dir string, f *assetFile, md *as
 
 	// get the original file name from metadata
 	if md != nil && md.FileName != "" {
+		// Log the metadata we're about to use
+		to.log.Log().Debug("Using metadata in makeAsset", "fileName", md.FileName, "description", md.Description, "dateTaken", md.DateTaken, "latitude", md.Latitude, "longitude", md.Longitude)
+
 		title := md.FileName
 
 		// a.OriginalFileName = md.FileName
@@ -557,9 +688,37 @@ func (to *Takeout) makeAsset(_ context.Context, dir string, f *assetFile, md *as
 		}
 		a.FromApplication = a.UseMetadata(md)
 		a.OriginalFileName = title
+
+		// Log the asset after applying metadata
+		to.log.Log().Debug("Asset after UseMetadata", "fileName", a.OriginalFileName, "description", a.Description, "dateTaken", a.CaptureDate, "latitude", a.Latitude, "longitude", a.Longitude)
 	}
 	a.SetNameInfo(to.flags.InfoCollector.GetInfo(a.OriginalFileName))
 	return a
+}
+
+// extractAlbumNamesFromDescription extracts album names from a description with format "album_name: Album1, Album2"
+// and returns the album names and the cleaned description without the album_name prefix
+func extractAlbumNamesFromDescription(description string) ([]string, string) {
+	// Check if the description has the album_name prefix
+	if !strings.HasPrefix(description, "album_name: ") {
+		return nil, description
+	}
+
+	// Extract the album names part after "album_name: "
+	albumNamesStr := strings.TrimPrefix(description, "album_name: ")
+
+	// Split by comma and trim whitespace from each album name
+	albumNames := strings.Split(albumNamesStr, ",")
+	var result []string
+	for _, name := range albumNames {
+		trimmedName := strings.TrimSpace(name)
+		if trimmedName != "" {
+			result = append(result, trimmedName)
+		}
+	}
+
+	// Return the original description since we want to preserve it for verification
+	return result, description
 }
 
 func (to *Takeout) filterOnMetadata(ctx context.Context, a *assets.Asset) fileevent.Code {
@@ -570,6 +729,11 @@ func (to *Takeout) filterOnMetadata(ctx context.Context, a *assets.Asset) fileev
 	}
 	if !to.flags.KeepPartner && a.FromPartner {
 		to.logMessage(ctx, fileevent.DiscoveredDiscarded, a, "discarding partner file")
+		a.Close()
+		return fileevent.DiscoveredDiscarded
+	}
+	if !to.flags.KeepSharedAlbum && a.FromSharedAlbum {
+		to.logMessage(ctx, fileevent.DiscoveredDiscarded, a, "discarding shared album file")
 		a.Close()
 		return fileevent.DiscoveredDiscarded
 	}

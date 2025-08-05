@@ -33,6 +33,9 @@ type ImportFlags struct {
 	// KeepPartner determines whether to import photos from the partner's Google Photos account.
 	KeepPartner bool
 
+	// KeepSharedAlbum determines whether to import photos from shared albums.
+	KeepSharedAlbum bool
+
 	// KeepUntitled determines whether to include photos from albums without a title in the import process.
 	KeepUntitled bool
 
@@ -79,6 +82,13 @@ type ImportFlags struct {
 
 	// PeopleTag indicates whether to add a people tag to the imported assets.
 	PeopleTag bool
+
+	// SharedAlbumTag indicates whether to add \"From Shared Album\" tag.
+	SharedAlbumTag bool
+
+	// CreateSharedAlbums indicates whether to create albums for photos with album_name descriptions
+	CreateSharedAlbums bool
+
 	// Timezone
 	TZ *time.Location
 }
@@ -99,6 +109,7 @@ func (o *ImportFlags) AddFromGooglePhotosFlags(cmd *cobra.Command, parent *cobra
 	cmd.Flags().BoolVar(&o.KeepUntitled, "include-untitled-albums", false, "Include photos from albums without a title in the import process")
 	cmd.Flags().BoolVarP(&o.KeepTrashed, "include-trashed", "t", false, "Import photos that are marked as trashed in Google Photos")
 	cmd.Flags().BoolVarP(&o.KeepPartner, "include-partner", "p", true, "Import photos from your partner's Google Photos account")
+	cmd.Flags().BoolVar(&o.KeepSharedAlbum, "include-shared-album", true, "Import photos from shared albums in Google Photos")
 	cmd.Flags().StringVar(&o.PartnerSharedAlbum, "partner-shared-album", "", "Add partner's photo to the specified album name")
 	cmd.Flags().BoolVarP(&o.KeepArchived, "include-archived", "a", true, "Import archived Google Photos")
 	cmd.Flags().BoolVarP(&o.KeepJSONLess, "include-unmatched", "u", false, "Import photos that do not have a matching JSON file in the takeout")
@@ -107,6 +118,8 @@ func (o *ImportFlags) AddFromGooglePhotosFlags(cmd *cobra.Command, parent *cobra
 	cmd.Flags().BoolVar(&o.SessionTag, "session-tag", false, "Tag uploaded photos with a tag \"{immich-go}/YYYY-MM-DD HH-MM-SS\"")
 	cmd.Flags().BoolVar(&o.TakeoutTag, "takeout-tag", true, "Tag uploaded photos with a tag \"{takeout}/takeout-YYYYMMDDTHHMMSSZ\"")
 	cmd.Flags().BoolVar(&o.PeopleTag, "people-tag", true, "Tag uploaded photos with tags \"people/name\" found in the JSON file")
+	cmd.Flags().BoolVar(&o.SharedAlbumTag, "shared-album-tag", true, "Tag photos from shared albums with \"From Shared Album\"")
+	cmd.Flags().BoolVar(&o.CreateSharedAlbums, "create-shared-albums", true, "Create albums for photos with album_name descriptions")
 	cliflags.AddInclusionFlags(cmd, &o.InclusionFlags)
 
 	// exif.AddExifToolFlags(cmd, &o.ExifToolFlags)

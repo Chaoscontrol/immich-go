@@ -855,29 +855,47 @@ func (upCmd *UpCmd) processUploadedAsset(ctx context.Context, a *assets.Asset, s
 
 // executeDelayedAlbumAndTagOperations executes the delayed album and tag operations immediately
 func (upCmd *UpCmd) executeDelayedAlbumAndTagOperations(ctx context.Context) error {
-	// Execute delayed album operations
+	// Group assets by album to avoid creating the same album multiple times
+	albumToAssets := make(map[string][]string)    // Map of album title to asset IDs
+	albumObjects := make(map[string]assets.Album) // Map of album title to album object
+
+	// Collect all albums and their associated assets
 	for assetID, albums := range upCmd.delayedAlbums {
 		for _, album := range albums {
-			al := assets.NewAlbum("", album.Title, album.Description)
-			// Execute immediately instead of using cache
-			if al.ID == "" {
-				// Create new album
-				r, err := upCmd.app.Client().Immich.CreateAlbum(ctx, al.Title, al.Description, []string{assetID})
-				if err != nil {
-					upCmd.app.Jnl().Log().Error("failed to create album", "err", err, "album", al.Title)
-					return err
-				}
-				upCmd.app.Jnl().Log().Info("created album", "album", al.Title, "assets", 1)
-				al.ID = r.ID
-			} else {
-				// Add asset to existing album
-				_, err := upCmd.app.Client().Immich.AddAssetToAlbum(ctx, al.ID, []string{assetID})
-				if err != nil {
-					upCmd.app.Jnl().Log().Error("failed to add assets to album", "err", err, "album", al.Title, "assets", 1)
-					return err
-				}
-				upCmd.app.Jnl().Log().Info("updated album", "album", al.Title, "assets", 1)
+			albumToAssets[album.Title] = append(albumToAssets[album.Title], assetID)
+			// Store the album object for later use
+			if _, exists := albumObjects[album.Title]; !exists {
+				albumObjects[album.Title] = album
 			}
+		}
+	}
+
+	// Execute delayed album operations
+	for albumTitle, assetIDs := range albumToAssets {
+		album := albumObjects[albumTitle]
+		al := assets.NewAlbum("", album.Title, album.Description)
+		// Create album only once for all assets with this album
+		if al.ID == "" {
+			// Create new album with all assets
+			r, err := upCmd.app.Client().Immich.CreateAlbum(ctx, al.Title, al.Description, assetIDs)
+			if err != nil {
+				upCmd.app.Jnl().Log().Error("failed to create album", "err", err, "album", al.Title)
+				return err
+			}
+			upCmd.app.Jnl().Log().Info("created album", "album", al.Title, "assets", len(assetIDs))
+			al.ID = r.ID
+		} else {
+			// Add all assets to existing album
+			_, err := upCmd.app.Client().Immich.AddAssetToAlbum(ctx, al.ID, assetIDs)
+			if err != nil {
+				upCmd.app.Jnl().Log().Error("failed to add assets to album", "err", err, "album", al.Title, "assets", len(assetIDs))
+				return err
+			}
+			upCmd.app.Jnl().Log().Info("updated album", "album", al.Title, "assets", len(assetIDs))
+		}
+
+		// Record album events for each asset
+		for _, assetID := range assetIDs {
 			upCmd.app.Jnl().Record(ctx, fileevent.UploadAddToAlbum, fshelper.FSName(nil, assetID), "album", al.Title)
 		}
 	}

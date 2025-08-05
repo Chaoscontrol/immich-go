@@ -43,6 +43,11 @@ type UpCmd struct {
 
 	shouldResumeJobs map[string]bool // List of jobs to resume
 	finished         bool            // the finish task has been run
+
+	// Delayed metadata and tagging operations
+	delayedAlbums   map[string][]assets.Album   // Map of asset IDs to albums to be added
+	delayedTags     map[string][]assets.Tag     // Map of asset IDs to tags to be added
+	delayedMetadata map[string]*assets.Metadata // Map of asset IDs to metadata to be applied
 }
 
 func newUpload(mode UpLoadMode, app *app.Application, options *UploadOptions) *UpCmd {
@@ -52,6 +57,9 @@ func newUpload(mode UpLoadMode, app *app.Application, options *UploadOptions) *U
 		Mode:              mode,
 		localAssets:       syncset.New[string](),
 		immichAssetsReady: make(chan struct{}),
+		delayedAlbums:     make(map[string][]assets.Album),
+		delayedTags:       make(map[string][]assets.Tag),
+		delayedMetadata:   make(map[string]*assets.Metadata),
 	}
 
 	return upCmd
@@ -165,13 +173,28 @@ func (UpCmd *UpCmd) isSidecarQueueClear(ctx context.Context, app *app.Applicatio
 	}
 
 	jobCounts := sidecarJob.JobCounts
-	UpCmd.app.Jnl().Log().Info("Sidecar job queue status",
-		"active", jobCounts.Active,
-		"completed", jobCounts.Completed,
-		"failed", jobCounts.Failed,
-		"delayed", jobCounts.Delayed,
-		"waiting", jobCounts.Waiting,
-		"paused", jobCounts.Paused)
+
+	// Queue is clear when all counts are 0
+	return jobCounts.Active == 0 &&
+		jobCounts.Waiting == 0 &&
+		jobCounts.Delayed == 0 &&
+		jobCounts.Paused == 0, nil
+}
+
+// isMetadataExtractionQueueClear checks if the metadataExtraction job queue is clear
+func (UpCmd *UpCmd) isMetadataExtractionQueueClear(ctx context.Context, app *app.Application) (bool, error) {
+	jobs, err := app.Client().AdminImmich.GetJobs(ctx)
+	if err != nil {
+		return false, err
+	}
+
+	metadataJob, exists := jobs["metadataExtraction"]
+	if !exists {
+		// If metadataExtraction job doesn't exist, consider it clear
+		return true, nil
+	}
+
+	jobCounts := metadataJob.JobCounts
 
 	// Queue is clear when all counts are 0
 	return jobCounts.Active == 0 &&
@@ -182,19 +205,91 @@ func (UpCmd *UpCmd) isSidecarQueueClear(ctx context.Context, app *app.Applicatio
 
 // waitForSidecarQueueToClear waits until the sidecar job queue is clear
 func (UpCmd *UpCmd) waitForSidecarQueueToClear(ctx context.Context, app *app.Application) error {
-	UpCmd.app.Jnl().Log().Info("Waiting for sidecar job queue to clear...")
-
 	for {
 		select {
 		case <-ctx.Done():
 			return ctx.Err()
 		default:
-			clear, err := UpCmd.isSidecarQueueClear(ctx, app)
+			// Get job status for logging
+			jobs, err := app.Client().AdminImmich.GetJobs(ctx)
 			if err != nil {
 				return err
 			}
+
+			sidecarJob, exists := jobs["sidecar"]
+			if !exists {
+				UpCmd.app.Jnl().Log().Info("Sidecar job queue is clear (job doesn't exist)")
+				return nil
+			}
+
+			jobCounts := sidecarJob.JobCounts
+			UpCmd.app.Jnl().Log().Info("Sidecar job queue status",
+				"active", jobCounts.Active,
+				"completed", jobCounts.Completed,
+				"failed", jobCounts.Failed,
+				"delayed", jobCounts.Delayed,
+				"waiting", jobCounts.Waiting,
+				"paused", jobCounts.Paused)
+
+			// Check if queue is clear
+			clear := jobCounts.Active == 0 &&
+				jobCounts.Waiting == 0 &&
+				jobCounts.Delayed == 0 &&
+				jobCounts.Paused == 0
+
 			if clear {
-				UpCmd.app.Jnl().Log().Info("Sidecar job queue is clear")
+				return nil
+			}
+
+			// Wait a bit before checking again
+			timer := time.NewTimer(5 * time.Second)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
+}
+
+// waitForMetadataExtractionQueueToClear waits until the metadataExtraction job queue is clear
+func (UpCmd *UpCmd) waitForMetadataExtractionQueueToClear(ctx context.Context, app *app.Application) error {
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			// Get job status for logging
+			jobs, err := app.Client().AdminImmich.GetJobs(ctx)
+			if err != nil {
+				return err
+			}
+
+			metadataJob, exists := jobs["metadataExtraction"]
+			if !exists {
+				UpCmd.app.Jnl().Log().Info("MetadataExtraction job queue is clear (job doesn't exist)")
+				return nil
+			}
+
+			jobCounts := metadataJob.JobCounts
+			UpCmd.app.Jnl().Log().Info("MetadataExtraction job queue status",
+				"active", jobCounts.Active,
+				"completed", jobCounts.Completed,
+				"failed", jobCounts.Failed,
+				"delayed", jobCounts.Delayed,
+				"waiting", jobCounts.Waiting,
+				"paused", jobCounts.Paused)
+
+			// Check if queue is clear
+			clear := jobCounts.Active == 0 &&
+				jobCounts.Waiting == 0 &&
+				jobCounts.Delayed == 0 &&
+				jobCounts.Paused == 0
+
+			if clear {
 				return nil
 			}
 
@@ -218,19 +313,100 @@ func (UpCmd *UpCmd) finishing(ctx context.Context, app *app.Application) error {
 	}
 	defer func() { UpCmd.finished = true }()
 	// do waiting operations
-	UpCmd.albumsCache.Close()
-	UpCmd.tagsCache.Close()
 
-	// Wait for sidecar job queue to clear after metadata updates
 	if app.Client().PauseImmichBackgroundJobs {
-		UpCmd.app.Jnl().Log().Info("Metadata updates complete, waiting for sidecar job queue to clear...")
+		// Step 1: Wait for sidecar job to complete after uploads
+		UpCmd.app.Jnl().Log().Info("Uploads complete, waiting for sidecar job queue to clear...")
 		err := UpCmd.waitForSidecarQueueToClear(ctx, app)
 		if err != nil {
 			UpCmd.app.Jnl().Log().Error("Error waiting for sidecar job queue to clear", "err", err.Error())
 			return err
 		}
-		UpCmd.app.Jnl().Log().Info("Sidecar job queue is clear, resuming all jobs...")
+		UpCmd.app.Jnl().Log().Info("Sidecar job queue is clear")
+
+		// Step 2: Resume metadataExtraction job only
+		UpCmd.app.Jnl().Log().Info("Resuming metadataExtraction job only...")
+		_, err = app.Client().AdminImmich.SendJobCommand(ctx, "metadataExtraction", "resume", true)
+		if err != nil {
+			UpCmd.app.Jnl().Log().Error("Error resuming metadataExtraction job", "err", err.Error())
+			return err
+		}
+		UpCmd.app.Jnl().Log().Info("metadataExtraction job resumed")
+
+		// Step 3: Wait for metadataExtraction job queue to clear
+		UpCmd.app.Jnl().Log().Info("Waiting for metadataExtraction job queue to clear...")
+		err = UpCmd.waitForMetadataExtractionQueueToClear(ctx, app)
+		if err != nil {
+			UpCmd.app.Jnl().Log().Error("Error waiting for metadataExtraction job queue to clear", "err", err.Error())
+			return err
+		}
+		UpCmd.app.Jnl().Log().Info("MetadataExtraction job queue is clear")
+
+		// Step 4: Pause metadataExtraction job again
+		UpCmd.app.Jnl().Log().Info("Pausing metadataExtraction job again...")
+		_, err = app.Client().AdminImmich.SendJobCommand(ctx, "metadataExtraction", "pause", true)
+		if err != nil {
+			UpCmd.app.Jnl().Log().Error("Error pausing metadataExtraction job", "err", err.Error())
+			return err
+		}
+		UpCmd.app.Jnl().Log().Info("metadataExtraction job paused")
+
+		// Step 5: Run the delayed album and tag operations (before metadata updates)
+		UpCmd.app.Jnl().Log().Info("Running delayed album and tag operations...")
+		err = UpCmd.executeDelayedAlbumAndTagOperations(ctx)
+		if err != nil {
+			UpCmd.app.Jnl().Log().Error("Error executing delayed album and tag operations", "err", err.Error())
+			return err
+		}
+		UpCmd.app.Jnl().Log().Info("Delayed album and tag operations complete")
+
+		// Clear the delayed albums and tags maps since they've been processed
+		UpCmd.delayedAlbums = make(map[string][]assets.Album)
+		UpCmd.delayedTags = make(map[string][]assets.Tag)
+
+		// Step 6: Run the delayed metadata operations
+		UpCmd.app.Jnl().Log().Info("Running delayed metadata operations...")
+		err = UpCmd.executeDelayedMetadataOperations(ctx)
+		if err != nil {
+			UpCmd.app.Jnl().Log().Error("Error executing delayed metadata operations", "err", err.Error())
+			return err
+		}
+		UpCmd.app.Jnl().Log().Info("Delayed metadata operations complete")
+
+		// Step 7: Wait for sidecar job to clear after metadata updates
+		UpCmd.app.Jnl().Log().Info("Waiting for sidecar job queue to clear after metadata updates...")
+		err = UpCmd.waitForSidecarQueueToClear(ctx, app)
+		if err != nil {
+			UpCmd.app.Jnl().Log().Error("Error waiting for sidecar job queue to clear", "err", err.Error())
+			return err
+		}
+		UpCmd.app.Jnl().Log().Info("Sidecar job queue is clear")
+
+		// Step 7: Resume metadataExtraction job one final time
+		UpCmd.app.Jnl().Log().Info("Resuming metadataExtraction job one final time...")
+		_, err = app.Client().AdminImmich.SendJobCommand(ctx, "metadataExtraction", "resume", true)
+		if err != nil {
+			UpCmd.app.Jnl().Log().Error("Error resuming metadataExtraction job", "err", err.Error())
+			return err
+		}
+		UpCmd.app.Jnl().Log().Info("metadataExtraction job resumed")
+
+		// Step 8: Wait for metadataExtraction job queue to clear after metadata updates
+		UpCmd.app.Jnl().Log().Info("Waiting for metadataExtraction job queue to clear after metadata updates...")
+		err = UpCmd.waitForMetadataExtractionQueueToClear(ctx, app)
+		if err != nil {
+			UpCmd.app.Jnl().Log().Error("Error waiting for metadataExtraction job queue to clear", "err", err.Error())
+			return err
+		}
+		UpCmd.app.Jnl().Log().Info("MetadataExtraction job queue is clear")
+
+		// Step 9: Resume all remaining jobs
+		UpCmd.app.Jnl().Log().Info("Resuming all remaining jobs...")
 	}
+
+	// Close the caches after we've finished using them
+	UpCmd.albumsCache.Close()
+	UpCmd.tagsCache.Close()
 
 	// Resume immich background jobs if requested
 	err := UpCmd.resumeJobs(ctx, app)
@@ -583,20 +759,9 @@ func (upCmd *UpCmd) uploadAsset(ctx context.Context, a *assets.Asset) (string, e
 	//  if theID, ok := upCmd.assetIndex.byI
 
 	if a.FromApplication != nil && ar.Status != immich.StatusDuplicate {
-		// metadata from application (immich or google photos) are forced.
-		// if a.Description != "" || (a.Latitude != 0 && a.Longitude != 0) || a.Rating != 0 || !a.CaptureDate.IsZero() {
-		a.UseMetadata(a.FromApplication)
-		_, err := upCmd.app.Client().Immich.UpdateAsset(ctx, a.ID, immich.UpdAssetField{
-			Description:      a.Description,
-			Latitude:         a.Latitude,
-			Longitude:        a.Longitude,
-			Rating:           a.Rating,
-			DateTimeOriginal: a.CaptureDate,
-		})
-		if err != nil {
-			upCmd.app.Jnl().Record(ctx, fileevent.UploadServerError, a.File, "error", err.Error())
-			return "", err
-		}
+		// Instead of applying metadata immediately, collect it for later application
+		// This prevents racing conditions with the metadataExtraction job
+		upCmd.delayedMetadata[a.ID] = a.FromApplication
 	}
 	upCmd.assetIndex.addLocalAsset(a)
 	return ar.Status, nil
@@ -624,6 +789,13 @@ func (upCmd *UpCmd) replaceAsset(ctx context.Context, ID string, a, old *assets.
 		a.ID = ID
 		upCmd.app.Jnl().Record(ctx, fileevent.UploadUpgraded, a.File)
 		upCmd.assetIndex.replaceAsset(a, old)
+
+		// Handle metadata for replaced assets the same way as uploaded assets
+		if a.FromApplication != nil {
+			// Instead of applying metadata immediately, collect it for later application
+			// This prevents racing conditions with the metadataExtraction job
+			upCmd.delayedMetadata[a.ID] = a.FromApplication
+		}
 	}
 	return ar.Status, nil
 }
@@ -670,9 +842,115 @@ func (upCmd *UpCmd) processUploadedAsset(ctx context.Context, a *assets.Asset, s
 	if serverStatus != immich.StatusDuplicate {
 		// TODO: current version of Immich doesn't allow to add same tag to an asset already tagged.
 		//       there is no mean to go the list of tagged assets for a given tag.
-		upCmd.manageAssetAlbums(ctx, a.File, a.ID, a.Albums)
-		upCmd.manageAssetTags(ctx, a)
+
+		// Instead of executing immediately, collect the operations for later execution
+		if len(a.Albums) > 0 {
+			upCmd.delayedAlbums[a.ID] = append(upCmd.delayedAlbums[a.ID], a.Albums...)
+		}
+		if len(a.Tags) > 0 {
+			upCmd.delayedTags[a.ID] = append(upCmd.delayedTags[a.ID], a.Tags...)
+		}
 	}
+}
+
+// executeDelayedAlbumAndTagOperations executes the delayed album and tag operations immediately
+func (upCmd *UpCmd) executeDelayedAlbumAndTagOperations(ctx context.Context) error {
+	// Execute delayed album operations
+	for assetID, albums := range upCmd.delayedAlbums {
+		for _, album := range albums {
+			al := assets.NewAlbum("", album.Title, album.Description)
+			// Execute immediately instead of using cache
+			if al.ID == "" {
+				// Create new album
+				r, err := upCmd.app.Client().Immich.CreateAlbum(ctx, al.Title, al.Description, []string{assetID})
+				if err != nil {
+					upCmd.app.Jnl().Log().Error("failed to create album", "err", err, "album", al.Title)
+					return err
+				}
+				upCmd.app.Jnl().Log().Info("created album", "album", al.Title, "assets", 1)
+				al.ID = r.ID
+			} else {
+				// Add asset to existing album
+				_, err := upCmd.app.Client().Immich.AddAssetToAlbum(ctx, al.ID, []string{assetID})
+				if err != nil {
+					upCmd.app.Jnl().Log().Error("failed to add assets to album", "err", err, "album", al.Title, "assets", 1)
+					return err
+				}
+				upCmd.app.Jnl().Log().Info("updated album", "album", al.Title, "assets", 1)
+			}
+			upCmd.app.Jnl().Record(ctx, fileevent.UploadAddToAlbum, fshelper.FSName(nil, assetID), "album", al.Title)
+		}
+	}
+
+	// Group assets by tag to avoid creating the same tag multiple times
+	tagToAssets := make(map[string][]string)  // Map of tag value to asset IDs
+	tagObjects := make(map[string]assets.Tag) // Map of tag value to tag object
+
+	// Collect all tags and their associated assets
+	for assetID, tags := range upCmd.delayedTags {
+		for _, tag := range tags {
+			tagToAssets[tag.Value] = append(tagToAssets[tag.Value], assetID)
+			// Store the tag object for later use
+			if _, exists := tagObjects[tag.Value]; !exists {
+				tagObjects[tag.Value] = tag
+			}
+		}
+	}
+
+	// Execute delayed tag operations
+	for tagValue, assetIDs := range tagToAssets {
+		tag := tagObjects[tagValue]
+		// Create tag only once for all assets with this tag
+		if tag.ID == "" {
+			// Create new tag
+			r, err := upCmd.app.Client().Immich.UpsertTags(ctx, []string{tag.Value})
+			if err != nil {
+				upCmd.app.Jnl().Log().Error("failed to create tag", "err", err, "tag", tag.Name)
+				return err
+			}
+			upCmd.app.Jnl().Log().Info("created tag", "tag", tag.Value)
+			tag.ID = r[0].ID
+			// Update the tag object in our map
+			tagObjects[tag.Value] = tag
+		}
+
+		// Add all assets to the tag
+		_, err := upCmd.app.Client().Immich.TagAssets(ctx, tag.ID, assetIDs)
+		if err != nil {
+			upCmd.app.Jnl().Log().Error("failed to add assets to tag", "err", err, "tag", tag.Value, "assets", len(assetIDs))
+			return err
+		}
+		upCmd.app.Jnl().Log().Info("updated tag", "tag", tag.Value, "assets", len(assetIDs))
+
+		// Record tagging events for each asset
+		for _, assetID := range assetIDs {
+			upCmd.app.Jnl().Record(ctx, fileevent.Tagged, fshelper.FSName(nil, assetID), "tag", tag.Value)
+		}
+	}
+
+	return nil
+}
+
+// executeDelayedMetadataOperations executes the delayed metadata operations
+func (upCmd *UpCmd) executeDelayedMetadataOperations(ctx context.Context) error {
+	// Execute delayed metadata operations
+	for assetID, metadata := range upCmd.delayedMetadata {
+		// Apply the metadata to the asset
+		_, err := upCmd.app.Client().Immich.UpdateAsset(ctx, assetID, immich.UpdAssetField{
+			Description:      metadata.Description,
+			Latitude:         metadata.Latitude,
+			Longitude:        metadata.Longitude,
+			Rating:           int(metadata.Rating),
+			DateTimeOriginal: metadata.DateTaken,
+		})
+		if err != nil {
+			upCmd.app.Jnl().Record(ctx, fileevent.UploadServerError, fshelper.FSName(nil, assetID), "error", err.Error())
+			return err
+		}
+		upCmd.app.Jnl().Record(ctx, fileevent.Metadata, fshelper.FSName(nil, assetID), "operation", "metadata update")
+	}
+
+	return nil
 }
 
 /*

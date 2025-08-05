@@ -38,19 +38,32 @@
 ### Runs on Any Platform:
   * Immich-Go is available for Windows, MacOS, Linux, and FreeBSD. It can run on any platform where the Go language is ported.
 
-## Racing Issue Workaround Test
+## Enhanced Job Management Workflow to avoid Racing Issue
 
-In this branch, we implemented a simplified workaround for a racing issue that occurs when uploading large libraries to Immich. The problem was that when uploading many files and immediately trying to update them (add tags, metadata, add to albums), some photos would get the updates while others wouldn't. This happened because the sidecar job needed to run and complete before the updates could be properly applied.
+We've implemented an improved workflow to resolve the racing issue that occurs when uploading large libraries to Immich. The problem was that when uploading many files and immediately trying to update them (add tags, metadata, add to albums), some photos would get the updates while others wouldn't. This happened because both the sidecar and metadataExtraction jobs needed to run and complete before the updates could be properly applied.
 
-Our approach was to modify the immich-go process order:
+Our new approach modifies the immich-go process order to ensure proper synchronization:
 
 1. Stop all jobs except the sidecar job (which needs to stay running)
-2. Allow uploads and updates to run normally
-3. Before resuming all jobs, wait for the sidecar job queue to clear
+2. Upload all assets first without applying metadata updates
+3. Wait for the sidecar job queue to clear (ensuring all sidecar processing is complete)
+4. Resume only the metadataExtraction job (to process the uploaded assets)
+5. Wait for the metadataExtraction job queue to clear
+6. Pause the metadataExtraction job again
+7. Apply all metadata updates (tags, albums, descriptions, etc.) to the uploaded assets
+8. Wait for the sidecar job queue to clear again after metadata updates
+9. Resume the metadataExtraction job one final time
+10. Wait for the metadataExtraction job queue to clear after metadata updates
+11. Resume all remaining jobs and finish the process
 
-We also enhanced the logging to show all available fields from the sidecar job queue status (active, completed, failed, delayed, waiting, paused) during the waiting process.
+This workflow ensures that:
+- All assets are uploaded first without interference from metadata operations
+- The sidecar job has time to process all uploaded assets before any metadata updates
+- The metadataExtraction job processes uploaded assets before any metadata updates are applied
+- All metadata updates are applied after both jobs have completed their work
+- Detailed logging shows the status of job queues at each step of the process
 
-While this implementation works and provides more detailed logging, it did not fully resolve the racing issue. We'll be exploring other approaches in future branches.
+The implementation also includes enhanced logging that shows all available fields from both the sidecar and metadataExtraction job queue status (active, completed, failed, delayed, waiting, paused) during the waiting process, making it easier to monitor the progress.
 
 ## Requirements
 

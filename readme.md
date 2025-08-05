@@ -32,10 +32,25 @@
 * Stack burst photos
 * Manage coupled RAW and JPEG files, HEIC and JPEG files
 * Use tags
+* Enhanced sidecar job handling with detailed queue status logging
 * ... and much more
 
 ### Runs on Any Platform:
   * Immich-Go is available for Windows, MacOS, Linux, and FreeBSD. It can run on any platform where the Go language is ported.
+
+## Racing Issue Workaround Test
+
+In this branch, we implemented a simplified workaround for a racing issue that occurs when uploading large libraries to Immich. The problem was that when uploading many files and immediately trying to update them (add tags, metadata, add to albums), some photos would get the updates while others wouldn't. This happened because the sidecar job needed to run and complete before the updates could be properly applied.
+
+Our approach was to modify the immich-go process order:
+
+1. Stop all jobs except the sidecar job (which needs to stay running)
+2. Allow uploads and updates to run normally
+3. Before resuming all jobs, wait for the sidecar job queue to clear
+
+We also enhanced the logging to show all available fields from the sidecar job queue status (active, completed, failed, delayed, waiting, paused) during the waiting process.
+
+While this implementation works and provides more detailed logging, it did not fully resolve the racing issue. We'll be exploring other approaches in future branches.
 
 ## Requirements
 

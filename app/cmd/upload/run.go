@@ -6,6 +6,7 @@ import (
 	"fmt"
 	"io/fs"
 	"strings"
+	"time"
 
 	"github.com/gdamore/tcell/v2"
 	"github.com/simulot/immich-go/adapters"
@@ -113,6 +114,11 @@ func (UpCmd *UpCmd) pauseJobs(ctx context.Context, app *app.Application) error {
 		return err
 	}
 	for name, job := range jobs {
+		// Skip the sidecar job - it needs to remain active
+		if name == "sidecar" {
+			UpCmd.app.Jnl().Log().Info("Skipping pause of sidecar job - keeping it active")
+			continue
+		}
 		UpCmd.shouldResumeJobs[name] = !job.QueueStatus.IsPaused
 		if UpCmd.shouldResumeJobs[name] {
 			_, err = app.Client().AdminImmich.SendJobCommand(ctx, name, "pause", true)
@@ -145,6 +151,67 @@ func (UpCmd *UpCmd) resumeJobs(_ context.Context, app *app.Application) error {
 	return nil
 }
 
+// isSidecarQueueClear checks if the sidecar job queue is clear (no active, waiting, delayed, or paused jobs)
+func (UpCmd *UpCmd) isSidecarQueueClear(ctx context.Context, app *app.Application) (bool, error) {
+	jobs, err := app.Client().AdminImmich.GetJobs(ctx)
+	if err != nil {
+		return false, err
+	}
+
+	sidecarJob, exists := jobs["sidecar"]
+	if !exists {
+		// If sidecar job doesn't exist, consider it clear
+		return true, nil
+	}
+
+	jobCounts := sidecarJob.JobCounts
+	UpCmd.app.Jnl().Log().Info("Sidecar job queue status",
+		"active", jobCounts.Active,
+		"completed", jobCounts.Completed,
+		"failed", jobCounts.Failed,
+		"delayed", jobCounts.Delayed,
+		"waiting", jobCounts.Waiting,
+		"paused", jobCounts.Paused)
+
+	// Queue is clear when all counts are 0
+	return jobCounts.Active == 0 &&
+		jobCounts.Waiting == 0 &&
+		jobCounts.Delayed == 0 &&
+		jobCounts.Paused == 0, nil
+}
+
+// waitForSidecarQueueToClear waits until the sidecar job queue is clear
+func (UpCmd *UpCmd) waitForSidecarQueueToClear(ctx context.Context, app *app.Application) error {
+	UpCmd.app.Jnl().Log().Info("Waiting for sidecar job queue to clear...")
+
+	for {
+		select {
+		case <-ctx.Done():
+			return ctx.Err()
+		default:
+			clear, err := UpCmd.isSidecarQueueClear(ctx, app)
+			if err != nil {
+				return err
+			}
+			if clear {
+				UpCmd.app.Jnl().Log().Info("Sidecar job queue is clear")
+				return nil
+			}
+
+			// Wait a bit before checking again
+			timer := time.NewTimer(5 * time.Second)
+			select {
+			case <-ctx.Done():
+				if !timer.Stop() {
+					<-timer.C
+				}
+				return ctx.Err()
+			case <-timer.C:
+			}
+		}
+	}
+}
+
 func (UpCmd *UpCmd) finishing(ctx context.Context, app *app.Application) error {
 	if UpCmd.finished {
 		return nil
@@ -153,6 +220,17 @@ func (UpCmd *UpCmd) finishing(ctx context.Context, app *app.Application) error {
 	// do waiting operations
 	UpCmd.albumsCache.Close()
 	UpCmd.tagsCache.Close()
+
+	// Wait for sidecar job queue to clear after metadata updates
+	if app.Client().PauseImmichBackgroundJobs {
+		UpCmd.app.Jnl().Log().Info("Metadata updates complete, waiting for sidecar job queue to clear...")
+		err := UpCmd.waitForSidecarQueueToClear(ctx, app)
+		if err != nil {
+			UpCmd.app.Jnl().Log().Error("Error waiting for sidecar job queue to clear", "err", err.Error())
+			return err
+		}
+		UpCmd.app.Jnl().Log().Info("Sidecar job queue is clear, resuming all jobs...")
+	}
 
 	// Resume immich background jobs if requested
 	err := UpCmd.resumeJobs(ctx, app)

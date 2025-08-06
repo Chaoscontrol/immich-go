@@ -26,6 +26,11 @@ type UpCmd struct {
 	Mode UpLoadMode
 	*UploadOptions
 	app *app.Application
+	// Summary counters
+	createdAlbumCountByTitle map[string]int
+	updatedAlbumCountByTitle map[string]int
+	createdTagCountByValue   map[string]bool
+	updatedTagCountByValue   map[string]int
 
 	assetIndex        *immichIndex         // List of assets present on the server
 	localAssets       *syncset.Set[string] // List of assets present on the local input by name+size
@@ -52,14 +57,18 @@ type UpCmd struct {
 
 func newUpload(mode UpLoadMode, app *app.Application, options *UploadOptions) *UpCmd {
 	upCmd := &UpCmd{
-		UploadOptions:     options,
-		app:               app,
-		Mode:              mode,
-		localAssets:       syncset.New[string](),
-		immichAssetsReady: make(chan struct{}),
-		delayedAlbums:     make(map[string][]assets.Album),
-		delayedTags:       make(map[string][]assets.Tag),
-		delayedMetadata:   make(map[string]*assets.Metadata),
+		UploadOptions:            options,
+		app:                      app,
+		Mode:                     mode,
+		localAssets:              syncset.New[string](),
+		immichAssetsReady:        make(chan struct{}),
+		delayedAlbums:            make(map[string][]assets.Album),
+		delayedTags:              make(map[string][]assets.Tag),
+		delayedMetadata:          make(map[string]*assets.Metadata),
+		createdAlbumCountByTitle: make(map[string]int),
+		updatedAlbumCountByTitle: make(map[string]int),
+		createdTagCountByValue:   make(map[string]bool),
+		updatedTagCountByValue:   make(map[string]int),
 	}
 
 	return upCmd
@@ -351,7 +360,12 @@ func (UpCmd *UpCmd) finishing(ctx context.Context, app *app.Application) error {
 		}
 		UpCmd.app.Jnl().Log().Info("metadataExtraction job paused")
 
-		// Step 5: Run the delayed album and tag operations (before metadata updates)
+		// Step 5: Refresh albums from server and run the delayed album and tag operations (before metadata updates)
+		UpCmd.app.Jnl().Log().Info("Refreshing existing albums from server before batching album/tag operations...")
+		// Best-effort: refresh the albums cache so we can reuse existing albums by name
+		if errGA := UpCmd.getImmichAlbums(ctx); errGA != nil {
+			UpCmd.app.Jnl().Log().Warn("Failed to refresh existing albums from server, will still proceed with batching", "err", errGA.Error())
+		}
 		UpCmd.app.Jnl().Log().Info("Running delayed album and tag operations...")
 		err = UpCmd.executeDelayedAlbumAndTagOperations(ctx)
 		if err != nil {
@@ -402,6 +416,45 @@ func (UpCmd *UpCmd) finishing(ctx context.Context, app *app.Application) error {
 
 		// Step 9: Resume all remaining jobs
 		UpCmd.app.Jnl().Log().Info("Resuming all remaining jobs...")
+	}
+
+	// Print final summary for albums and tags (deduplicated)
+	if len(UpCmd.createdAlbumCountByTitle) > 0 || len(UpCmd.updatedAlbumCountByTitle) > 0 ||
+		len(UpCmd.createdTagCountByValue) > 0 || len(UpCmd.updatedTagCountByValue) > 0 {
+		UpCmd.app.Jnl().Log().Info("Summary of albums and tags updates:")
+	}
+
+	// Build a unique set of album titles from both created and updated maps
+	albumTitles := make(map[string]struct{})
+	for title := range UpCmd.updatedAlbumCountByTitle {
+		albumTitles[title] = struct{}{}
+	}
+	for title := range UpCmd.createdAlbumCountByTitle {
+		albumTitles[title] = struct{}{}
+	}
+
+	// Emit exactly one line per album title
+	for title := range albumTitles {
+		n := UpCmd.updatedAlbumCountByTitle[title] // zero if absent
+		if _, created := UpCmd.createdAlbumCountByTitle[title]; created {
+			UpCmd.app.Jnl().Log().Info("created album", "album", title, "assets", n)
+		} else {
+			UpCmd.app.Jnl().Log().Info("updated album", "album", title, "assets", n)
+		}
+	}
+
+	// Tags: same logic as before but they are already naturally deduped
+	for tagValue, n := range UpCmd.updatedTagCountByValue {
+		if UpCmd.createdTagCountByValue[tagValue] {
+			UpCmd.app.Jnl().Log().Info("created tag", "tag", tagValue, "assets", n)
+		} else {
+			UpCmd.app.Jnl().Log().Info("updated tag", "tag", tagValue, "assets", n)
+		}
+	}
+	for tagValue := range UpCmd.createdTagCountByValue {
+		if _, alreadyLogged := UpCmd.updatedTagCountByValue[tagValue]; !alreadyLogged {
+			UpCmd.app.Jnl().Log().Info("created tag", "tag", tagValue, "assets", 0)
+		}
 	}
 
 	// Close the caches after we've finished using them
@@ -861,49 +914,72 @@ func (upCmd *UpCmd) processUploadedAsset(ctx context.Context, a *assets.Asset, s
 
 // executeDelayedAlbumAndTagOperations executes the delayed album and tag operations immediately
 func (upCmd *UpCmd) executeDelayedAlbumAndTagOperations(ctx context.Context) error {
-	// Group assets by album to avoid creating the same album multiple times
-	albumToAssets := make(map[string][]string)    // Map of album title to asset IDs
-	albumObjects := make(map[string]assets.Album) // Map of album title to album object
+	// Build a map of album title -> asset IDs to avoid creating the same album multiple times
+	albumToAssets := make(map[string][]string)
+	albumObjects := make(map[string]assets.Album)
 
-	// Collect all albums and their associated assets
 	for assetID, albums := range upCmd.delayedAlbums {
 		for _, album := range albums {
 			albumToAssets[album.Title] = append(albumToAssets[album.Title], assetID)
-			// Store the album object for later use
 			if _, exists := albumObjects[album.Title]; !exists {
 				albumObjects[album.Title] = album
 			}
 		}
 	}
 
-	// Execute delayed album operations
-	for albumTitle, assetIDs := range albumToAssets {
-		album := albumObjects[albumTitle]
-		al := assets.NewAlbum("", album.Title, album.Description)
-		// Create album only once for all assets with this album
-		if al.ID == "" {
-			// Create new album with all assets
-			r, err := upCmd.app.Client().Immich.CreateAlbum(ctx, al.Title, al.Description, assetIDs)
-			if err != nil {
-				upCmd.app.Jnl().Log().Error("failed to create album", "err", err, "album", al.Title)
-				return err
-			}
-			upCmd.app.Jnl().Log().Info("created album", "album", al.Title, "assets", len(assetIDs))
-			al.ID = r.ID
-		} else {
-			// Add all assets to existing album
-			_, err := upCmd.app.Client().Immich.AddAssetToAlbum(ctx, al.ID, assetIDs)
-			if err != nil {
-				upCmd.app.Jnl().Log().Error("failed to add assets to album", "err", err, "album", al.Title, "assets", len(assetIDs))
-				return err
-			}
-			upCmd.app.Jnl().Log().Info("updated album", "album", al.Title, "assets", len(assetIDs))
+	// Build a map of existing server albums by title (best-effort)
+	existingByTitle := map[string]assets.Album{}
+	if serverAlbums, err := upCmd.app.Client().Immich.GetAllAlbums(ctx); err == nil {
+		for _, a := range serverAlbums {
+			existingByTitle[a.AlbumName] = assets.NewAlbum(a.ID, a.AlbumName, a.Description)
 		}
+	} else {
+		upCmd.app.Jnl().Log().Warn("Unable to fetch existing albums list, may create duplicates if cache is empty", "err", err.Error())
+	}
+
+	// Execute delayed album operations, reusing existing albums when possible
+	for albumTitle, assetIDs := range albumToAssets {
+		desired := albumObjects[albumTitle]
+
+		// Try to reuse an existing album by title
+		if existing, ok := existingByTitle[albumTitle]; ok && existing.ID != "" {
+			upCmd.app.Jnl().Log().Info("Reusing existing album", "album", albumTitle, "assets", len(assetIDs))
+			if _, err := upCmd.app.Client().Immich.AddAssetToAlbum(ctx, existing.ID, assetIDs); err != nil {
+				upCmd.app.Jnl().Log().Error("failed to add assets to existing album", "err", err, "album", albumTitle, "assets", len(assetIDs))
+				return err
+			}
+			// Record album events for each asset
+			for _, assetID := range assetIDs {
+				upCmd.app.Jnl().Record(ctx, fileevent.UploadAddToAlbum, fshelper.FSName(nil, assetID), "album", albumTitle)
+			}
+			// Keep cache in sync for potential later use within the same run
+			upCmd.albumsCache.NewCollection(albumTitle, existing, assetIDs)
+			// Update summary counts
+			upCmd.updatedAlbumCountByTitle[albumTitle] += len(assetIDs)
+			continue
+		}
+
+		// Not found on server, create a new album with all assets
+		newAlbum := assets.NewAlbum("", desired.Title, desired.Description)
+		r, err := upCmd.app.Client().Immich.CreateAlbum(ctx, newAlbum.Title, newAlbum.Description, assetIDs)
+		if err != nil {
+			upCmd.app.Jnl().Log().Error("failed to create album", "err", err, "album", newAlbum.Title)
+			return err
+		}
+		upCmd.app.Jnl().Log().Info("created album", "album", newAlbum.Title, "assets", len(assetIDs))
+		newAlbum.ID = r.ID
+		// Update summary counts
+		upCmd.createdAlbumCountByTitle[newAlbum.Title]++
+		upCmd.updatedAlbumCountByTitle[newAlbum.Title] += len(assetIDs)
 
 		// Record album events for each asset
 		for _, assetID := range assetIDs {
-			upCmd.app.Jnl().Record(ctx, fileevent.UploadAddToAlbum, fshelper.FSName(nil, assetID), "album", al.Title)
+			upCmd.app.Jnl().Record(ctx, fileevent.UploadAddToAlbum, fshelper.FSName(nil, assetID), "album", newAlbum.Title)
 		}
+
+		// Update maps/cache to avoid duplicates within the same run
+		existingByTitle[albumTitle] = newAlbum
+		upCmd.albumsCache.NewCollection(albumTitle, newAlbum, assetIDs)
 	}
 
 	// Group assets by tag to avoid creating the same tag multiple times
@@ -936,6 +1012,8 @@ func (upCmd *UpCmd) executeDelayedAlbumAndTagOperations(ctx context.Context) err
 			tag.ID = r[0].ID
 			// Update the tag object in our map
 			tagObjects[tag.Value] = tag
+			// Mark as created for summary
+			upCmd.createdTagCountByValue[tag.Value] = true
 		}
 
 		// Add all assets to the tag
@@ -945,6 +1023,8 @@ func (upCmd *UpCmd) executeDelayedAlbumAndTagOperations(ctx context.Context) err
 			return err
 		}
 		upCmd.app.Jnl().Log().Info("updated tag", "tag", tag.Value, "assets", len(assetIDs))
+		// Update summary counts
+		upCmd.updatedTagCountByValue[tag.Value] += len(assetIDs)
 
 		// Record tagging events for each asset
 		for _, assetID := range assetIDs {

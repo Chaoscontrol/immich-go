@@ -703,7 +703,13 @@ func (upCmd *UpCmd) handleAsset(ctx context.Context, a *assets.Asset) error {
 	case BetterOnServer: // and manage albums
 		a.ID = advice.ServerAsset.ID
 		upCmd.app.Jnl().Record(ctx, fileevent.UploadServerBetter, a.File, "reason", advice.Message)
-		upCmd.manageAssetAlbums(ctx, a.File, a.ID, a.Albums)
+		// Instead of executing immediately, collect the operations for later execution
+		if len(a.Albums) > 0 {
+			upCmd.delayedAlbums[a.ID] = append(upCmd.delayedAlbums[a.ID], a.Albums...)
+		}
+		if len(a.Tags) > 0 {
+			upCmd.delayedTags[a.ID] = append(upCmd.delayedTags[a.ID], a.Tags...)
+		}
 
 	case ForceUpload:
 		var serverStatus string

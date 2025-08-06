@@ -429,6 +429,7 @@ The **from-google-photos** sub-command processes a Google Photos takeout archive
 | --include-extensions      |                 `all`                 | Comma-separated list of extension to include. (e.g. .jpg, .heic)                                                                                                                   |
 | --include-type            |                 `all`                 | Single file type to include. (`VIDEO` or `IMAGE`)                                                                                                                                  |
 | -p, --include-partner     |                `TRUE`                 | Import photos from your partner's Google Photos account                                                                                                                            |
+| -u, --include-unmatched   |                `FALSE`                | Import photos that do not have a matching JSON file in the takeout. When enabled, unmatched assets are automatically tagged with "Unmatched" to simplify locating them in Immich. |
 | -t, --include-trashed     |                `FALSE`                | Import photos that are marked as trashed in Google Photos                                                                                                                          |
 | -u, --include-unmatched   |                `FALSE`                | Import photos that do not have a matching JSON file in the takeout                                                                                                                 |
 | --include-untitled-albums |                `FALSE`                | Include photos from albums without a title in the import process                                                                                                                   |
@@ -476,7 +477,7 @@ When Immich-Go processes a takeout with this album information, it will automati
 * **What if many of my files are not imported?**
   * Verify if all takeout parts have been included in the processing. Have you used the `takeout-*.zip` file name pattern?
   * Sometimes, the takeout result is incomplete. Request another takeout, either for an entire year or in smaller increments.
-  * Force the import of files despite missing JSON files using the option `--include-unmatched`.
+  * Force the import of files despite missing JSON files using the option `--include-unmatched`. When this option is used, imported unmatched assets will be tagged with "Unmatched" so you can filter and verify them in Immich.
 
 ## Takeout Tag
 

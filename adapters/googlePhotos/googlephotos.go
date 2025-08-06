@@ -693,6 +693,13 @@ func (to *Takeout) makeAsset(_ context.Context, dir string, f *assetFile, md *as
 		to.log.Log().Debug("Asset after UseMetadata", "fileName", a.OriginalFileName, "description", a.Description, "dateTaken", a.CaptureDate, "latitude", a.Latitude, "longitude", a.Longitude)
 	}
 	a.SetNameInfo(to.flags.InfoCollector.GetInfo(a.OriginalFileName))
+
+	// Tag unmatched assets when --include-unmatched (-u) is used.
+	// Unmatched assets are created with md == nil in solvePuzzle when KeepJSONLess is true.
+	if md == nil && to.flags.KeepJSONLess {
+		a.AddTag("Unmatched")
+	}
+
 	return a
 }
 

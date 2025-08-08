@@ -914,6 +914,9 @@ func (upCmd *UpCmd) processUploadedAsset(ctx context.Context, a *assets.Asset, s
 
 // executeDelayedAlbumAndTagOperations executes the delayed album and tag operations immediately
 func (upCmd *UpCmd) executeDelayedAlbumAndTagOperations(ctx context.Context) error {
+	// First, deduplicate the delayed operations to prevent duplicate log entries
+	upCmd.deduplicateDelayedOperations()
+
 	// Build a map of album title -> asset IDs to avoid creating the same album multiple times
 	albumToAssets := make(map[string][]string)
 	albumObjects := make(map[string]assets.Album)
@@ -1033,6 +1036,38 @@ func (upCmd *UpCmd) executeDelayedAlbumAndTagOperations(ctx context.Context) err
 	}
 
 	return nil
+}
+
+// deduplicateDelayedOperations removes duplicate album and tag operations for the same asset
+// This prevents duplicate log entries when the same asset appears in multiple code paths
+func (upCmd *UpCmd) deduplicateDelayedOperations() {
+	// Deduplicate albums for each asset
+	for assetID, albums := range upCmd.delayedAlbums {
+		seenAlbums := make(map[string]bool)
+		uniqueAlbums := make([]assets.Album, 0, len(albums))
+
+		for _, album := range albums {
+			if !seenAlbums[album.Title] {
+				seenAlbums[album.Title] = true
+				uniqueAlbums = append(uniqueAlbums, album)
+			}
+		}
+		upCmd.delayedAlbums[assetID] = uniqueAlbums
+	}
+
+	// Deduplicate tags for each asset
+	for assetID, tags := range upCmd.delayedTags {
+		seenTags := make(map[string]bool)
+		uniqueTags := make([]assets.Tag, 0, len(tags))
+
+		for _, tag := range tags {
+			if !seenTags[tag.Value] {
+				seenTags[tag.Value] = true
+				uniqueTags = append(uniqueTags, tag)
+			}
+		}
+		upCmd.delayedTags[assetID] = uniqueTags
+	}
 }
 
 // executeDelayedMetadataOperations executes the delayed metadata operations

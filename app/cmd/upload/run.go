@@ -89,7 +89,7 @@ func (upCmd *UpCmd) saveAlbum(ctx context.Context, album assets.Album, ids []str
 			upCmd.app.Jnl().Log().Error("failed to create album", "err", err, "album", album.Title)
 			return album, err
 		}
-		upCmd.app.Jnl().Log().Info("created album", "album", album.Title, "assets", len(ids))
+		// Removed individual log entry to avoid duplicates
 		album.ID = r.ID
 		return album, nil
 	}
@@ -98,7 +98,7 @@ func (upCmd *UpCmd) saveAlbum(ctx context.Context, album assets.Album, ids []str
 		upCmd.app.Jnl().Log().Error("failed to add assets to album", "err", err, "album", album.Title, "assets", len(ids))
 		return album, err
 	}
-	upCmd.app.Jnl().Log().Info("updated album", "album", album.Title, "assets", len(ids))
+	// Removed individual log entry to avoid duplicates
 	return album, err
 }
 
@@ -112,7 +112,7 @@ func (upCmd *UpCmd) saveTags(ctx context.Context, tag assets.Tag, ids []string) 
 			upCmd.app.Jnl().Log().Error("failed to create tag", "err", err, "tag", tag.Name)
 			return tag, err
 		}
-		upCmd.app.Jnl().Log().Info("created tag", "tag", tag.Value)
+		// Removed individual log entry to avoid duplicates
 		tag.ID = r[0].ID
 	}
 	_, err := upCmd.app.Client().Immich.TagAssets(ctx, tag.ID, ids)
@@ -120,7 +120,7 @@ func (upCmd *UpCmd) saveTags(ctx context.Context, tag assets.Tag, ids []string) 
 		upCmd.app.Jnl().Log().Error("failed to add assets to tag", "err", err, "tag", tag.Value, "assets", len(ids))
 		return tag, err
 	}
-	upCmd.app.Jnl().Log().Info("updated tag", "tag", tag.Value, "assets", len(ids))
+	// Removed individual log entry to avoid duplicates
 	return tag, err
 }
 
@@ -414,47 +414,51 @@ func (UpCmd *UpCmd) finishing(ctx context.Context, app *app.Application) error {
 		}
 		UpCmd.app.Jnl().Log().Info("MetadataExtraction job queue is clear")
 
+		// Print final summary for albums (deduplicated)
+		if len(UpCmd.createdAlbumCountByTitle) > 0 || len(UpCmd.updatedAlbumCountByTitle) > 0 {
+			UpCmd.app.Jnl().Log().Info("Summary of albums updates:")
+		}
+
+		// Build a unique set of album titles from both created and updated maps
+		albumTitles := make(map[string]struct{})
+		for title := range UpCmd.updatedAlbumCountByTitle {
+			albumTitles[title] = struct{}{}
+		}
+		for title := range UpCmd.createdAlbumCountByTitle {
+			albumTitles[title] = struct{}{}
+		}
+
+		// Emit exactly one line per album title
+		for title := range albumTitles {
+			n := UpCmd.updatedAlbumCountByTitle[title] // zero if absent
+			if _, created := UpCmd.createdAlbumCountByTitle[title]; created {
+				UpCmd.app.Jnl().Log().Info("created album", "album", title, "assets", n)
+			} else {
+				UpCmd.app.Jnl().Log().Info("updated album", "album", title, "assets", n)
+			}
+		}
+
+		// Print final summary for tags (deduplicated)
+		if len(UpCmd.createdTagCountByValue) > 0 || len(UpCmd.updatedTagCountByValue) > 0 {
+			UpCmd.app.Jnl().Log().Info("Summary of tags updates:")
+		}
+
+		// Tags: same logic as before but they are already naturally deduped
+		for tagValue, n := range UpCmd.updatedTagCountByValue {
+			if UpCmd.createdTagCountByValue[tagValue] {
+				UpCmd.app.Jnl().Log().Info("created tag", "tag", tagValue, "assets", n)
+			} else {
+				UpCmd.app.Jnl().Log().Info("updated tag", "tag", tagValue, "assets", n)
+			}
+		}
+		for tagValue := range UpCmd.createdTagCountByValue {
+			if _, alreadyLogged := UpCmd.updatedTagCountByValue[tagValue]; !alreadyLogged {
+				UpCmd.app.Jnl().Log().Info("created tag", "tag", tagValue, "assets", 0)
+			}
+		}
+
 		// Step 9: Resume all remaining jobs
 		UpCmd.app.Jnl().Log().Info("Resuming all remaining jobs...")
-	}
-
-	// Print final summary for albums and tags (deduplicated)
-	if len(UpCmd.createdAlbumCountByTitle) > 0 || len(UpCmd.updatedAlbumCountByTitle) > 0 ||
-		len(UpCmd.createdTagCountByValue) > 0 || len(UpCmd.updatedTagCountByValue) > 0 {
-		UpCmd.app.Jnl().Log().Info("Summary of albums and tags updates:")
-	}
-
-	// Build a unique set of album titles from both created and updated maps
-	albumTitles := make(map[string]struct{})
-	for title := range UpCmd.updatedAlbumCountByTitle {
-		albumTitles[title] = struct{}{}
-	}
-	for title := range UpCmd.createdAlbumCountByTitle {
-		albumTitles[title] = struct{}{}
-	}
-
-	// Emit exactly one line per album title
-	for title := range albumTitles {
-		n := UpCmd.updatedAlbumCountByTitle[title] // zero if absent
-		if _, created := UpCmd.createdAlbumCountByTitle[title]; created {
-			UpCmd.app.Jnl().Log().Info("created album", "album", title, "assets", n)
-		} else {
-			UpCmd.app.Jnl().Log().Info("updated album", "album", title, "assets", n)
-		}
-	}
-
-	// Tags: same logic as before but they are already naturally deduped
-	for tagValue, n := range UpCmd.updatedTagCountByValue {
-		if UpCmd.createdTagCountByValue[tagValue] {
-			UpCmd.app.Jnl().Log().Info("created tag", "tag", tagValue, "assets", n)
-		} else {
-			UpCmd.app.Jnl().Log().Info("updated tag", "tag", tagValue, "assets", n)
-		}
-	}
-	for tagValue := range UpCmd.createdTagCountByValue {
-		if _, alreadyLogged := UpCmd.updatedTagCountByValue[tagValue]; !alreadyLogged {
-			UpCmd.app.Jnl().Log().Info("created tag", "tag", tagValue, "assets", 0)
-		}
 	}
 
 	// Close the caches after we've finished using them

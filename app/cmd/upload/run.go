@@ -1023,13 +1023,26 @@ func (upCmd *UpCmd) executeDelayedAlbumAndTagOperations(ctx context.Context) err
 			upCmd.createdTagCountByValue[tag.Value] = true
 		}
 
-		// Add all assets to the tag
-		_, err := upCmd.app.Client().Immich.TagAssets(ctx, tag.ID, assetIDs)
-		if err != nil {
-			upCmd.app.Jnl().Log().Error("failed to add assets to tag", "err", err, "tag", tag.Value, "assets", len(assetIDs))
-			return err
+		// Add all assets to the tag in batches to avoid PostgreSQL parameter limit
+		const batchSize = 30000
+		for i := 0; i < len(assetIDs); i += batchSize {
+			end := i + batchSize
+			if end > len(assetIDs) {
+				end = len(assetIDs)
+			}
+
+			batch := assetIDs[i:end]
+			_, err := upCmd.app.Client().Immich.TagAssets(ctx, tag.ID, batch)
+			if err != nil {
+				upCmd.app.Jnl().Log().Error("failed to add assets to tag", "err", err, "tag", tag.Value, "assets", len(batch))
+				return err
+			}
+
+			// Only log the total count once
+			if i == 0 {
+				upCmd.app.Jnl().Log().Info("updated tag", "tag", tag.Value, "assets", len(assetIDs))
+			}
 		}
-		upCmd.app.Jnl().Log().Info("updated tag", "tag", tag.Value, "assets", len(assetIDs))
 		// Update summary counts
 		upCmd.updatedTagCountByValue[tag.Value] += len(assetIDs)
 

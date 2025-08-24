@@ -418,6 +418,7 @@ The **from-google-photos** sub-command processes a Google Photos takeout archive
 | --people-tag              |                `TRUE`                 | Tag uploaded photos with tags \"people/name\" found in the JSON file                                                                                                               |
 | --shared-album-tag        |                `TRUE`                 | Tag photos from others in shared albums with \"From Shared Album\".                                                                                                                  |
 | --create-shared-albums    |                `TRUE`                 | Create albums for photos with album_name descriptions.                                                                                                                               |
+| --only-partner-in-albums  |                `FALSE`                | Import only partner photos that are found inside albums                                                                                                                            |
 
 ## Shared Album Support
 

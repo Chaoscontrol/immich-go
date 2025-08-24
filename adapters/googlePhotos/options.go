@@ -45,6 +45,9 @@ type ImportFlags struct {
 	// KeepJSONLess determines whether to import photos that do not have a matching JSON file in the takeout.
 	KeepJSONLess bool
 
+	// OnlyPartnerInAlbums determines whether to import only partner photos that are found inside albums.
+	OnlyPartnerInAlbums bool
+
 	// Flags  for controlling the extensions of the files to be uploaded
 	InclusionFlags cliflags.InclusionFlags
 
@@ -120,6 +123,7 @@ func (o *ImportFlags) AddFromGooglePhotosFlags(cmd *cobra.Command, parent *cobra
 	cmd.Flags().BoolVar(&o.PeopleTag, "people-tag", true, "Tag uploaded photos with tags \"people/name\" found in the JSON file")
 	cmd.Flags().BoolVar(&o.SharedAlbumTag, "shared-album-tag", true, "Tag photos from shared albums with \"From Shared Album\"")
 	cmd.Flags().BoolVar(&o.CreateSharedAlbums, "create-shared-albums", true, "Create albums for photos with album_name descriptions")
+	cmd.Flags().BoolVar(&o.OnlyPartnerInAlbums, "only-partner-in-albums", false, "Import only partner photos that are found inside albums")
 	cliflags.AddInclusionFlags(cmd, &o.InclusionFlags)
 
 	// exif.AddExifToolFlags(cmd, &o.ExifToolFlags)

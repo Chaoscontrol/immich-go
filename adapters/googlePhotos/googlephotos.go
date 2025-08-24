@@ -729,45 +729,77 @@ func extractAlbumNamesFromDescription(description string) ([]string, string) {
 }
 
 func (to *Takeout) filterOnMetadata(ctx context.Context, a *assets.Asset) fileevent.Code {
-	if !to.flags.KeepArchived && a.Archived {
-		to.logMessage(ctx, fileevent.DiscoveredDiscarded, a, "discarding archived file")
-		a.Close()
-		return fileevent.DiscoveredDiscarded
-	}
-	if !to.flags.KeepPartner && a.FromPartner {
-		to.logMessage(ctx, fileevent.DiscoveredDiscarded, a, "discarding partner file")
-		a.Close()
-		return fileevent.DiscoveredDiscarded
-	}
-	if !to.flags.KeepSharedAlbum && a.FromSharedAlbum {
-		to.logMessage(ctx, fileevent.DiscoveredDiscarded, a, "discarding shared album file")
-		a.Close()
-		return fileevent.DiscoveredDiscarded
-	}
-	if !to.flags.KeepTrashed && a.Trashed {
-		to.logMessage(ctx, fileevent.DiscoveredDiscarded, a, "discarding trashed file")
-		a.Close()
-		return fileevent.DiscoveredDiscarded
-	}
-
-	if to.flags.InclusionFlags.DateRange.IsSet() && !to.flags.InclusionFlags.DateRange.InRange(a.CaptureDate) {
-		to.logMessage(ctx, fileevent.DiscoveredDiscarded, a, "discarding files out of date range")
-		a.Close()
-		return fileevent.DiscoveredDiscarded
-	}
-	if to.flags.ImportFromAlbum != "" {
-		keep := false
+	// Handle the new --only-partner-in-albums flag
+	if to.flags.OnlyPartnerInAlbums {
+		// Check if the asset is in an album directory
+		isInAlbum := false
 		dir := path.Dir(a.File.Name())
 		if dir == "." {
 			dir = ""
 		}
-		if album, ok := to.albums[dir]; ok {
-			keep = keep || album.Title == to.flags.ImportFromAlbum
+
+		// Check if asset is in any album
+		if _, ok := to.albums[dir]; ok {
+			isInAlbum = true
 		}
-		if !keep {
-			to.logMessage(ctx, fileevent.DiscoveredDiscarded, a, "discarding files not in the specified album")
+
+		// If --from-album-name is specified, check if asset is in that specific album
+		if to.flags.ImportFromAlbum != "" {
+			album, ok := to.albums[dir]
+			if !ok || album.Title != to.flags.ImportFromAlbum {
+				isInAlbum = false
+			}
+		}
+
+		// Include only partner photos that are in albums (specific album if --from-album-name is set)
+		// Exclude all other photos (partner photos outside albums, non-partner photos in albums, non-partner photos outside albums)
+		if !(a.FromPartner && isInAlbum) {
+			to.logMessage(ctx, fileevent.DiscoveredDiscarded, a, "discarding non-partner photo or partner photo not in album (only-partner-in-albums enabled)")
 			a.Close()
 			return fileevent.DiscoveredDiscarded
+		}
+	} else {
+		// Original filtering logic when --only-partner-in-albums is not enabled
+		if !to.flags.KeepArchived && a.Archived {
+			to.logMessage(ctx, fileevent.DiscoveredDiscarded, a, "discarding archived file")
+			a.Close()
+			return fileevent.DiscoveredDiscarded
+		}
+		if !to.flags.KeepPartner && a.FromPartner {
+			to.logMessage(ctx, fileevent.DiscoveredDiscarded, a, "discarding partner file")
+			a.Close()
+			return fileevent.DiscoveredDiscarded
+		}
+		if !to.flags.KeepSharedAlbum && a.FromSharedAlbum {
+			to.logMessage(ctx, fileevent.DiscoveredDiscarded, a, "discarding shared album file")
+			a.Close()
+			return fileevent.DiscoveredDiscarded
+		}
+		if !to.flags.KeepTrashed && a.Trashed {
+			to.logMessage(ctx, fileevent.DiscoveredDiscarded, a, "discarding trashed file")
+			a.Close()
+			return fileevent.DiscoveredDiscarded
+		}
+
+		if to.flags.InclusionFlags.DateRange.IsSet() && !to.flags.InclusionFlags.DateRange.InRange(a.CaptureDate) {
+			to.logMessage(ctx, fileevent.DiscoveredDiscarded, a, "discarding files out of date range")
+			a.Close()
+			return fileevent.DiscoveredDiscarded
+		}
+		if to.flags.ImportFromAlbum != "" {
+			keep := false
+			dir := path.Dir(a.File.Name())
+			if dir == "." {
+				dir = ""
+			}
+			if album, ok := to.albums[dir]; ok {
+				keep = keep || album.Title == to.flags.ImportFromAlbum
+			}
+			if !keep {
+				to.logMessage(ctx, fileevent.DiscoveredDiscarded, a, "discarding files not in the specified album")
+				a.Close()
+				return fileevent.DiscoveredDiscarded
+			}
 		}
 	}
 	return fileevent.Code(0)

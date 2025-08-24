@@ -446,6 +446,7 @@ The **from-google-photos** sub-command processes a Google Photos takeout archive
 | --include-shared-album    |                `TRUE`                 | Import photos from others in shared albums in Google Photos                                                                                                                                    |
 | --shared-album-tag        |                `TRUE`                 | Tag photos from others in shared albums with \"From Shared Album\".                                                                                                                  |
 | --create-shared-albums    |                `TRUE`                 | Create albums for photos with album_name descriptions.                                                                                                                               |
+| --only-partner-in-albums  |                `FALSE`                | Import only partner photos that are found inside albums                                                                                                                            |
 
 ## Shared Album Support
 
